@@ -1,0 +1,113 @@
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: covid19-configs
+  namespace: pinot
+data:
+  covid19_recovered_global_table_config.json: |-
+    {
+      "tableName": "covid19_recovered_global",
+      "tableType": "OFFLINE",
+      "segmentsConfig": {
+        "timeColumnName": "SecondsSinceEpoch",
+        "timeType": "SECONDS",
+        "segmentPushType": "REFRESH",
+        "segmentAssignmentStrategy": "BalanceNumSegmentAssignmentStrategy",
+        "schemaName": "covid19_recovered_global",
+        "replication": "2"
+      },
+      "tenants": {},
+      "tableIndexConfig": {
+        "loadMode": "MMAP",
+        "invertedIndex": ["Province_State", "Country_Region"]
+      },
+      "metadata": {
+        "customConfigs": {}
+      }
+    }
+
+  covid19_recovered_global_schema.json: |-
+    {
+      "metricFieldSpecs": [
+        {
+          "dataType": "INT",
+          "name": "Value"
+        }
+      ],
+      "dimensionFieldSpecs": [
+        {
+          "dataType": "STRING",
+          "name": "Province_State"
+        },
+        {
+          "dataType": "STRING",
+          "name": "Country_Region"
+        },
+        {
+          "dataType": "DOUBLE",
+          "name": "Lat"
+        },
+        {
+          "dataType": "DOUBLE",
+          "name": "Long"
+        },
+        {
+          "dataType": "STRING",
+          "name": "EventDate"
+        }
+      ],
+      "dateTimeFieldSpecs": [
+        {
+          "dataType": "INT",
+          "name": "DaysSinceEpoch",
+          "format": "1:DAYS:EPOCH",
+          "granularity": "1:DAYS"
+        }
+      ],
+      "timeFieldSpec": {
+        "incomingGranularitySpec": {
+          "dataType": "INT",
+          "timeType": "SECONDS",
+          "name": "SecondsSinceEpoch"
+        }
+      },
+      "schemaName": "covid19_recovered_global"
+    }
+
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: pinot-table-creation-covid19-recovered-global
+  namespace: pinot
+spec:
+  template:
+    spec:
+      containers:
+        - name: pinot-table-creation-covid19-recovered-global
+          image: apachepinot/pinot:latest
+          args: [
+            "AddTable",
+            "-schemaFile",
+            "/var/pinot/covid19_configs/covid19_recovered_global_schema.json",
+            "-tableConfigFile",
+            "/var/pinot/covid19_configs/covid19_recovered_global_table_config.json",
+            "-controllerHost",
+            "pinot-controller",
+            "-controllerPort",
+            "9000",
+            "-exec"
+          ]
+          env:
+            - name: JAVA_OPTS
+              value: "-Xms4G -Xmx4G -Dpinot.admin.system.exit=true"
+          volumeMounts:
+            - name: covid19-configs
+              mountPath: /var/pinot/covid19_configs
+      restartPolicy: OnFailure
+      volumes:
+        - name: covid19-configs
+          configMap:
+            name: covid19-configs
+  backoffLimit: 100

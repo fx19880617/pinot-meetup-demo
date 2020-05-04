@@ -1,0 +1,152 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: covid19-scripts
+  namespace: pinot
+data:
+  data-processing.py: |-
+    #!/usr/bin/python
+    import sys, getopt, csv
+    from datetime import datetime
+
+    def main(argv):
+      input_file = ''
+      output_file = ''
+      split_lines = -1
+      num_dims = 1
+      try:
+          opts, args = getopt.getopt(argv,"hi:o:d:l:",["ifile=","ofile=","numDims=","splitLines="])
+      except getopt.GetoptError:
+          print 'test.py -i <inputfile> -o <outputfile> -d <numDimensions> -l <splitLines>'
+          sys.exit(2)
+      for opt, arg in opts:
+          if opt == '-h':
+            print 'test.py -i <inputfile> -o <outputfile> -d <numDimensions> -l <splitLines>'
+            sys.exit()
+          elif opt in ("-i", "--ifile"):
+            input_file = arg
+          elif opt in ("-o", "--ofile"):
+            output_file = arg
+          elif opt in ("-d", "--numDims"):
+            num_dims = int(arg)
+          elif opt in ("-l", "--splitLines"):
+            split_lines = int(arg)
+      print 'Input file is ', input_file
+      print 'Output file is ', output_file
+      print 'Number of Dimensions is ', num_dims
+      print 'Lines to Split a file is ', split_lines
+      splitOneRowTimeSeriesToMultiRows(input_file, output_file, num_dims, split_lines)
+
+
+    def splitOneRowTimeSeriesToMultiRows(input_filename, output_filename, num_dims, split_lines):
+        file_id = 0
+        file_output = open(output_filename + "_" + str(file_id) + ".csv", mode='w')
+        file_writer = csv.writer(file_output, delimiter=',', quotechar='"', quoting=csv.QUOTE_MINIMAL)
+        with open(input_filename) as input_file:
+            csv_reader = csv.reader(input_file, delimiter=',')
+            line_count = 0
+            is_header = True
+            for row in csv_reader:
+                if is_header:
+                    header_row=row[0:num_dims]
+                    dates=row[num_dims:]
+                    for i in range(num_dims):
+                        header_row[i]=row[i].replace("/", "_")
+                    header_row.append('EventDate')
+                    header_row.append('SecondsSinceEpoch')
+                    header_row.append('DaysSinceEpoch')
+                    header_row.append('Value')
+                    print(", ".join(header_row))
+                    is_header = False
+                else:
+                    col_id = num_dims
+                    for d in dates:
+                        dims_value=row[0:num_dims]
+                        datetime_object = datetime.strptime(d, '%m/%d/%y')
+                        dims_value.append(datetime_object.strftime('%Y-%m-%d'))
+                        seconds = datetime_object.strftime('%s')
+                        dims_value.append(seconds)
+                        dims_value.append(str(int(seconds) / 86400))
+                        dims_value.append(row[col_id])
+                        print(", ".join(dims_value))
+                        file_writer.writerow(dims_value)
+                        col_id += 1
+                        line_count += 1
+                if split_lines != -1 and line_count >= split_lines:
+                    line_count = 0
+                    file_id += 1
+                    file_output.close()
+                    file_output = open(output_filename + "_" + str(file_id) + ".csv", mode='w')
+                    file_writer = csv.writer(file_output, delimiter=',', quotechar='"', quoting=csv.QUOTE_MINIMAL)
+                if line_count == 0:
+                    file_writer.writerow(header_row)
+        file_output.close()
+
+    if __name__ == "__main__":
+      main(sys.argv[1:])
+
+  covid19_recovered_global_ingestion_job.yaml: |-
+    executionFrameworkSpec:
+      name: 'standalone'
+      segmentGenerationJobRunnerClassName: 'org.apache.pinot.plugin.ingestion.batch.standalone.SegmentGenerationJobRunner'
+      segmentTarPushJobRunnerClassName: 'org.apache.pinot.plugin.ingestion.batch.standalone.SegmentTarPushJobRunner'
+      segmentUriPushJobRunnerClassName: 'org.apache.pinot.plugin.ingestion.batch.standalone.SegmentUriPushJobRunner'
+    jobType: SegmentCreationAndTarPush
+    inputDirURI: '/var/data/covid-19-data/covid19_recovered_global/rawdata'
+    includeFileNamePattern: 'glob:**/*.csv'
+    excludeFileNamePattern: 'glob:**/*.avro'
+    outputDirURI: '/var/data/covid-19-data/covid19_recovered_global/segments'
+    overwriteOutput: true
+    pinotFSSpecs:
+      - scheme: file
+        className: org.apache.pinot.spi.filesystem.LocalPinotFS
+    recordReaderSpec:
+      dataFormat: 'csv'
+      className: 'org.apache.pinot.plugin.inputformat.csv.CSVRecordReader'
+      configClassName: 'org.apache.pinot.plugin.inputformat.csv.CSVRecordReaderConfig'
+    tableSpec:
+      tableName: 'covid19_recovered_global'
+      schemaURI: 'http://pinot-controller:9000/tables/covid19_recovered_global/schema'
+      tableConfigURI: 'http://pinot-controller:9000/tables/covid19_recovered_global'
+    pinotClusterSpecs:
+      - controllerURI: 'http://pinot-controller:9000'
+    pushJobSpec:
+      pushAttempts: 2
+      pushRetryIntervalMillis: 1000
+
+  ingest_covid19_recovered_global.sh: |-
+    set -x
+    #!/usr/bin/bash
+    wget https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_recovered_global.csv
+    python /var/pinot/covid19_scripts/data-processing.py -i time_series_covid19_recovered_global.csv -o daily_split_time_series_covid19_recovered_global -d 4 -l 10000
+    mkdir -p /var/data/covid-19-data/covid19_recovered_global/rawdata
+    cp daily_split_time_series_covid19_recovered_global*.csv /var/data/covid-19-data/covid19_recovered_global/rawdata
+    bin/pinot-admin.sh LaunchDataIngestionJob  -jobSpecFile /var/pinot/covid19_scripts/covid19_recovered_global_ingestion_job.yaml
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: pinot-table-ingestion-batch-covid19-recovered-global-job
+  namespace: pinot
+spec:
+  template:
+    spec:
+      containers:
+      - name: pinot-table-ingestion-batch-covid19-recovered-global
+        image: apachepinot/pinot:latest
+        command: [ "bash", "/var/pinot/covid19_scripts/ingest_covid19_recovered_global.sh" ]
+        volumeMounts:
+          - name: covid19-scripts
+            mountPath: /var/pinot/covid19_scripts
+        resources:
+          requests:
+            cpu: 500m
+            memory: 512Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+      restartPolicy: OnFailure
+      volumes:
+        - name: covid19-scripts
+          configMap:
+            name: covid19-scripts

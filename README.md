@@ -1,0 +1,367 @@
+Pinot Meetup Demo
+=================
+
+This is the demo resources for Pinot meetup.
+
+
+0. Prepare a ready to use kubernetes cluster. It could be local docker-for-desktop/MiniKube cluster or cloud based k8s cluster, like AWS EKS.
+
+Deploy Pinot using HelmChart
+----------------------------
+
+1. Adding Pinot Helm Repo:
+```
+helm repo add pinot https://raw.githubusercontent.com/apache/incubator-pinot/master/kubernetes/helm
+```
+
+2. Create namespace `pinot`
+```
+kubectl create ns pinot
+```
+
+3. Deploy Pinot with 1 controller, 1 broker, 2 servers under cluster name `pinot`.
+```
+helm install pinot pinot/pinot \
+    -n pinot \
+    --set cluster.name=pinot \
+    --set server.replicaCount=2
+```
+
+4. (Advanced) You can always inspect values and modify them, then deploy pinot with your own configs:
+```
+helm inspect values pinot/pinot > /tmp/values.yaml
+
+## Modify `values.yaml`
+
+helm install pinot pinot/pinot --values /tmp/values.yaml -n pinot
+```
+
+Table Creation
+--------------
+Pinot table creation requires two files: table schema and table config.
+Here we put them into a ConfigMap and mount them as a volume.
+
+```
+kubectl apply -f covid19/covid19-recovered-global-table-creation.yaml
+```
+
+Data Ingestion
+--------------
+This example shows how to load [Covid-19 Daily Time-Series Summary Table of Global Recovered Cases](https://github.com/CSSEGISandData/COVID-19/blob/master/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_recovered_global.csv) to Pinot.
+
+Pinot data ingestion worflow is a typical ETL which contains 3 steps:
+- Extract rawdata (Download raw data from GitHub)
+- Transform data to the schema defined in Pinot table (See the Python script to convert one time series to one row per day)
+- Pinot segments creation and push (Ingestion job spec is defined in `covid19_recovered_global_ingestion_job.yaml`)
+
+All in one line.
+```
+kubectl apply -f covid19/covid19-recovered-global-ingestion-job.yaml
+```
+
+Query Pinot
+-----------
+There are two ways to query Pinot:
+1. [Web UI Query Console](http://localhost:9000/query)
+
+This UI is majorly for data exploreation from Users.
+
+2. Pinot Broker
+
+This is endpoint `${pinot_broker_host}:${pinot_broker_port}/query/sql` is for querying Pinot programatically.
+
+E.g. 
+```
+➜ curl -XPOST -d '{"sql": "select count(*) as total_cnt from covid19_recovered_global limit 10"}' localhost:8099/query/sql | jq .
+  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+100   566  100   488  100    78  32533   5200 --:--:-- --:--:-- --:--:-- 37733
+{
+  "resultTable": {
+    "dataSchema": {
+      "columnDataTypes": [
+        "LONG"
+      ],
+      "columnNames": [
+        "total_cnt"
+      ]
+    },
+    "rows": [
+      [
+        25956
+      ]
+    ]
+  },
+  "exceptions": [],
+  "numServersQueried": 2,
+  "numServersResponded": 2,
+  "numSegmentsQueried": 3,
+  "numSegmentsProcessed": 3,
+  "numSegmentsMatched": 3,
+  "numConsumingSegmentsQueried": 0,
+  "numDocsScanned": 25956,
+  "numEntriesScannedInFilter": 0,
+  "numEntriesScannedPostFilter": 0,
+  "numGroupsLimitReached": false,
+  "totalDocs": 25956,
+  "timeUsedMs": 10,
+  "segmentStatistics": [],
+  "traceInfo": {},
+  "minConsumingFreshnessTimeMs": 0
+}
+```
+
+Pinot Admin APIs
+----------------
+
+Pinot Admin APIs are under `http://localhost:9000/api`.
+
+Sample usage:
+Fetch table schema:
+```
+➜ curl localhost:9000/schemas/covid19_recovered_global| jq .
+{
+  "schemaName": "covid19_recovered_global",
+  "dimensionFieldSpecs": [
+    {
+      "name": "Province_State",
+      "dataType": "STRING"
+    },
+    {
+      "name": "Country_Region",
+      "dataType": "STRING"
+    },
+    {
+      "name": "Lat",
+      "dataType": "DOUBLE"
+    },
+    {
+      "name": "Long",
+      "dataType": "DOUBLE"
+    },
+    {
+      "name": "EventDate",
+      "dataType": "STRING"
+    }
+  ],
+  "metricFieldSpecs": [
+    {
+      "name": "Value",
+      "dataType": "INT"
+    }
+  ],
+  "timeFieldSpec": {
+    "incomingGranularitySpec": {
+      "name": "SecondsSinceEpoch",
+      "dataType": "INT",
+      "timeType": "SECONDS"
+    }
+  },
+  "dateTimeFieldSpecs": [
+    {
+      "name": "DaysSinceEpoch",
+      "dataType": "INT",
+      "format": "1:DAYS:EPOCH",
+      "granularity": "1:DAYS"
+    }
+  ]
+}
+```
+
+Fetch Table Config:
+```
+➜ curl localhost:9000/tables/covid19_recovered_global | jq .
+{
+  "OFFLINE": {
+    "tableName": "covid19_recovered_global_OFFLINE",
+    "tableType": "OFFLINE",
+    "segmentsConfig": {
+      "segmentAssignmentStrategy": "BalanceNumSegmentAssignmentStrategy",
+      "segmentPushType": "REFRESH",
+      "replication": "2",
+      "timeType": "SECONDS",
+      "timeColumnName": "SecondsSinceEpoch",
+      "schemaName": "covid19_recovered_global"
+    },
+    "tenants": {
+      "broker": "DefaultTenant",
+      "server": "DefaultTenant"
+    },
+    "tableIndexConfig": {
+      "autoGeneratedInvertedIndex": false,
+      "createInvertedIndexDuringSegmentGeneration": false,
+      "loadMode": "MMAP",
+      "aggregateMetrics": false,
+      "nullHandlingEnabled": false
+    },
+    "metadata": {
+      "customConfigs": {}
+    }
+  }
+}
+```
+
+Check Pinot Segment Assignement
+-------------------------------
+
+To check how Pinot segments are distributed across all the servers.
+
+```
+curl -X GET --header 'Accept: application/json' 'http://localhost:9000/tables/covid19_recovered_global/idealstate' | jq .
+```
+
+Since table config says replic is 2, so all 3 segments are on both `pinot-server-0` and `pinot-server-1`
+
+```
+{
+  "OFFLINE": {
+    "covid19_recovered_global_OFFLINE_1579651200_1588464000_0": {
+      "Server_pinot-server-0.pinot-server-headless.pinot.svc.cluster.local_8098": "ONLINE",
+      "Server_pinot-server-1.pinot-server-headless.pinot.svc.cluster.local_8098": "ONLINE"
+    },
+    "covid19_recovered_global_OFFLINE_1579651200_1588464000_1": {
+      "Server_pinot-server-0.pinot-server-headless.pinot.svc.cluster.local_8098": "ONLINE",
+      "Server_pinot-server-1.pinot-server-headless.pinot.svc.cluster.local_8098": "ONLINE"
+    },
+    "covid19_recovered_global_OFFLINE_1579651200_1588464000_2": {
+      "Server_pinot-server-0.pinot-server-headless.pinot.svc.cluster.local_8098": "ONLINE",
+      "Server_pinot-server-1.pinot-server-headless.pinot.svc.cluster.local_8098": "ONLINE"
+    }
+  },
+  "REALTIME": null
+}
+```
+
+Scale Pinot Server
+------------------
+
+Below command will add one more pinot-server instance.
+
+```
+kubectl scale statefulsets pinot-server --replicas=3 -n pinot
+```
+
+Run
+```
+kubectl get all -n pinot
+```
+to ensure that the `pinot-server-2` is in `running` status.
+
+Rebalance Pinot Table
+---------------------
+
+You can either use [Table Rebalance REST API](http://localhost:9000/api#!/Table/rebalance) to rebalance a Pinot Table or directly run this command against pinot controller pod.
+
+```
+kubectl exec pod/pinot-controller-0  -n pinot -- /opt/pinot/bin/pinot-admin.sh RebalanceTable -clusterName pinot -zkAddress pinot-zookeeper:2181 -tableName covid19_recovered_global_OFFLINE
+```
+
+After table rebalance is done, you can check new segment assignments:
+
+```
+curl -X GET --header 'Accept: application/json' 'http://localhost:9000/tables/covid19_recovered_global/idealstate' | jq .
+```
+
+All 3 segments are evenly distributed to 3 nodes, and each node has 2 segments now.
+
+```
+{
+  "OFFLINE": {
+    "covid19_recovered_global_OFFLINE_1579651200_1588464000_0": {
+      "Server_pinot-server-0.pinot-server-headless.pinot.svc.cluster.local_8098": "ONLINE",
+      "Server_pinot-server-2.pinot-server-headless.pinot.svc.cluster.local_8098": "ONLINE"
+    },
+    "covid19_recovered_global_OFFLINE_1579651200_1588464000_1": {
+      "Server_pinot-server-0.pinot-server-headless.pinot.svc.cluster.local_8098": "ONLINE",
+      "Server_pinot-server-1.pinot-server-headless.pinot.svc.cluster.local_8098": "ONLINE"
+    },
+    "covid19_recovered_global_OFFLINE_1579651200_1588464000_2": {
+      "Server_pinot-server-1.pinot-server-headless.pinot.svc.cluster.local_8098": "ONLINE",
+      "Server_pinot-server-2.pinot-server-headless.pinot.svc.cluster.local_8098": "ONLINE"
+    }
+  },
+  "REALTIME": null
+}
+```
+
+Presto Integration
+------------------
+
+Presto has a Pinot connector integration, which extends Pinot's query capability to full SQL area, and unveil the power of joining Pinot table with any other data sources like MySQL.
+
+Deploy Presto Demo in one line.
+
+```
+kubectl apply -f presto-coordinator.yaml
+```
+
+Use Presto CLI to query Pinot:
+```
+./presto-cli.sh --server localhost:8080 --catalog pinot --schema default
+```
+
+Sample Queries:
+
+Show tables;
+```
+SHOW TABLES;
+```
+
+Describe table:
+```
+DESCRIBE covid19_recovered_global;
+```
+
+Select all:
+```
+SELECT * FROM covid19_recovered_global;
+```
+
+Top 10 recovered cases by country on Date 05/03.
+```
+presto:default> SELECT Country_Region, SUM(Value) as total_recovered from covid19_recovered_global WHERE "EventDate" = '2020-05-03' GROUP BY Country_Region ORDER BY total_recovered DESC LIMIT 10;
+ Country_Region | total_recovered
+----------------+-----------------
+ US             |          180152
+ Germany        |          130600
+ Spain          |          118902
+ Italy          |           81654
+ China          |           78684
+ Iran           |           78422
+ Turkey         |           63151
+ France         |           50885
+ Brazil         |           42991
+ Canada         |           24921
+(10 rows)
+
+Query 20200505_041638_00003_26tq2, FINISHED, 1 node
+Splits: 18 total, 18 done (100.00%)
+0:00 [187 rows, 3.01KB] [1.57K rows/s, 25.3KB/s]
+```
+
+Top 10 recovered cases by country on Date 05/03/2020 and 05/04/2020.
+```
+presto:default> WITH
+             ->   t1 AS (SELECT Country_Region, SUM(Value) as total_recovered from covid19_recovered_global WHERE "EventDate" = '2020-05-03' GROUP BY Country_Region),
+             ->   t2 AS (SELECT Country_Region, SUM(Value) as total_recovered from covid19_recovered_global WHERE "EventDate" = '2020-05-04' GROUP BY Country_Region)
+             -> SELECT t1.Country_Region, t1.total_recovered as Recovered_0503, t2.total_recovered as Recovered_0504
+             -> FROM  t1 JOIN  t2 ON t1.Country_Region=t2.Country_Region
+             -> ORDER BY t2.total_recovered DESC LIMIT 10;
+ country_region | Recovered_0503 | Recovered_0504
+----------------+----------------+----------------
+ US             |         180152 |         187180
+ Germany        |         130600 |         132700
+ Spain          |         118902 |         121343
+ Italy          |          81654 |          82879
+ Iran           |          78422 |          79379
+ China          |          78684 |          78792
+ Turkey         |          63151 |          68166
+ France         |          50885 |          51476
+ Brazil         |          42991 |          45815
+ Canada         |          24921 |          26030
+(10 rows)
+
+Query 20200505_231002_00013_dutii, FINISHED, 1 node
+Splits: 67 total, 67 done (100.00%)
+0:00 [374 rows, 6.02KB] [1.38K rows/s, 22.2KB/s]
+```
